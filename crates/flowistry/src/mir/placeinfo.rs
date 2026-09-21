@@ -24,6 +24,7 @@ use rustc_utils::{
     place::UNKNOWN_REGION,
   },
 };
+use smallvec::SmallVec;
 
 use super::{aliases::Aliases, utils::PlaceSet};
 use crate::extensions::{MutabilityMode, is_extension_active};
@@ -96,6 +97,20 @@ impl<'a, 'tcx> PlaceInfo<'a, 'tcx> {
     self
       .aliases_cache
       .get(&self.normalize(place), move |_| self.aliases.aliases(place))
+  }
+
+  pub fn influences(&self, place: Place<'tcx>) -> SmallVec<[Place<'tcx>; 8]> {
+    let conflicts = self
+      .aliases(place)
+      .iter()
+      .flat_map(|alias| self.conflicts(*alias));
+    let provenance =
+      place
+        .refs_in_projection(self.body, self.tcx)
+        .flat_map(|(place_ref, _)| {
+          self.aliases(Place::from_ref(place_ref, self.tcx)).iter()
+        });
+    conflicts.chain(provenance).copied().collect()
   }
 
   /// Returns all reachable fields of `place` without going through references.

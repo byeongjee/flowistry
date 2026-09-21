@@ -11,7 +11,7 @@ use rustc_middle::{
 };
 use rustc_mir_dataflow::Analysis;
 use rustc_utils::{
-  BodyExt, OperandExt, PlaceExt,
+  BodyExt, OperandExt,
   mir::{
     control_dependencies::ControlDependencies,
     location_or_arg::{
@@ -102,24 +102,6 @@ impl<'a, 'tcx> FlowAnalysis<'a, 'tcx> {
     self.place_info.location_domain()
   }
 
-  fn influences(&self, place: Place<'tcx>) -> SmallVec<[Place<'tcx>; 8]> {
-    let conflicts = self
-      .place_info
-      .aliases(place)
-      .iter()
-      .flat_map(|alias| self.place_info.conflicts(*alias));
-    let provenance =
-      place
-        .refs_in_projection(self.body, self.tcx)
-        .flat_map(|(place_ref, _)| {
-          self
-            .place_info
-            .aliases(Place::from_ref(place_ref, self.tcx))
-            .iter()
-        });
-    conflicts.chain(provenance).copied().collect()
-  }
-
   /// Returns all the dependencies of `place` within `state`.
   ///
   /// Prefer using this method instead of accessing `FlowDomain` directly,
@@ -134,7 +116,7 @@ impl<'a, 'tcx> FlowAnalysis<'a, 'tcx> {
       .place_info
       .reachable_values(place, Mutability::Not)
       .iter()
-      .flat_map(|place| self.influences(*place))
+      .flat_map(|place| self.place_info.influences(*place))
     {
       deps.union(state.row_set(&self.place_info.normalize(subplace)));
     }
@@ -162,7 +144,7 @@ impl<'a, 'tcx> FlowAnalysis<'a, 'tcx> {
     let add_deps = |state: &FlowDomain<'tcx>,
                     input,
                     target_deps: &mut LocationOrArgSet| {
-      for relevant in self.influences(input) {
+      for relevant in self.place_info.influences(input) {
         let relevant_deps = state.row_set(&self.place_info.normalize(relevant));
         trace!(
           "    For relevant {relevant:?} for input {input:?} adding deps {relevant_deps:?}"
