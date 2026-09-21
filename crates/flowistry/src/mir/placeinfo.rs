@@ -4,11 +4,13 @@ use std::{ops::ControlFlow, rc::Rc};
 
 use indexical::ToIndex;
 use rustc_borrowck::consumers::BodyWithBorrowckFacts;
+use rustc_data_structures::fx::FxHashSet;
 use rustc_hir::def_id::DefId;
 use rustc_middle::{
   mir::*,
   ty::{
-    Region, RegionKind, RegionVid, Ty, TyCtxt, TyKind, TypeSuperVisitable, TypeVisitor,
+    Region, RegionKind, RegionVid, Ty, TyCtxt, TyKind, TypeSuperVisitable, TypeVisitable,
+    TypeVisitor, TypingEnv,
   },
 };
 use rustc_utils::{
@@ -165,6 +167,9 @@ impl<'a, 'tcx> PlaceInfo<'a, 'tcx> {
   fn collect_loans(&self, ty: Ty<'tcx>, mutability: Mutability) -> PlaceSet<'tcx> {
     let mut collector = LoanCollector {
       aliases: &self.aliases,
+      tcx: self.tcx,
+      body: self.body,
+      typing_env: self.body.typing_env(self.tcx),
       unknown_region: Region::new_var(self.tcx, UNKNOWN_REGION),
       target_mutability: mutability,
       stack: vec![],
@@ -208,10 +213,61 @@ impl<'a, 'tcx> PlaceInfo<'a, 'tcx> {
 // Can we consolidate these?
 struct LoanCollector<'a, 'tcx> {
   aliases: &'a Aliases<'a, 'tcx>,
+  tcx: TyCtxt<'tcx>,
+  body: &'a Body<'tcx>,
+  typing_env: TypingEnv<'tcx>,
   unknown_region: Region<'tcx>,
   target_mutability: Mutability,
   stack: Vec<Mutability>,
   loans: PlaceSet<'tcx>,
+}
+
+// A shared borrow of data with interior mutability (`&cell`, `&vec_of_cells`,
+// `&rc`) can mutate that data, so it is treated as a mutable loan.
+fn may_contain_unsafe_cell<'tcx>(
+  tcx: TyCtxt<'tcx>,
+  typing_env: TypingEnv<'tcx>,
+  ty: Ty<'tcx>,
+) -> bool {
+  struct UnsafeCellFinder<'tcx> {
+    tcx: TyCtxt<'tcx>,
+    typing_env: TypingEnv<'tcx>,
+    visited: FxHashSet<Ty<'tcx>>,
+  }
+
+  impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for UnsafeCellFinder<'tcx> {
+    type Result = ControlFlow<()>;
+
+    fn visit_ty(&mut self, ty: Ty<'tcx>) -> Self::Result {
+      if !self.visited.insert(ty) {
+        return ControlFlow::Continue(());
+      }
+      if !ty.is_freeze(self.tcx, self.typing_env) {
+        return ControlFlow::Break(());
+      }
+      // `Freeze` is shallow, so the search goes through pointers. The explicit
+      // cases are the constituent types that the generic arguments do not show.
+      match ty.kind() {
+        TyKind::Adt(adt, args) => {
+          for field in adt.all_fields() {
+            field.ty(self.tcx, args).visit_with(self)?;
+          }
+        }
+        TyKind::Coroutine(..) | TyKind::CoroutineWitness(..) => {
+          return ControlFlow::Break(());
+        }
+        _ => {}
+      }
+      ty.super_visit_with(self)
+    }
+  }
+
+  let mut finder = UnsafeCellFinder {
+    tcx,
+    typing_env,
+    visited: FxHashSet::default(),
+  };
+  finder.visit_ty(ty).is_break()
 }
 
 impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for LoanCollector<'_, 'tcx> {
@@ -255,11 +311,15 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for LoanCollector<'_, 'tcx> {
           if ignore_mut {
             return Some(place);
           }
-          let loan_mutability = if under_immut_ref {
-            Mutability::Not
-          } else {
-            *mutability
-          };
+          let loan_ty = place.ty(self.body.local_decls(), self.tcx).ty;
+          let loan_mutability =
+            if may_contain_unsafe_cell(self.tcx, self.typing_env, loan_ty) {
+              Mutability::Mut
+            } else if under_immut_ref {
+              Mutability::Not
+            } else {
+              *mutability
+            };
           self
             .target_mutability
             .is_permissive_as(loan_mutability)
