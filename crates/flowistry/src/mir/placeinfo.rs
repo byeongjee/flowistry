@@ -10,7 +10,7 @@ use rustc_middle::{
   mir::*,
   ty::{
     Region, RegionKind, RegionVid, Ty, TyCtxt, TyKind, TypeSuperVisitable, TypeVisitable,
-    TypeVisitor, TypingEnv,
+    TypeVisitor, TypingEnv, fold_regions,
   },
 };
 use rustc_utils::{
@@ -237,6 +237,13 @@ struct LoanCollector<'a, 'tcx> {
   loans: PlaceSet<'tcx>,
 }
 
+// `Freeze` does not depend on regions, and `Ty::is_freeze` panics on a region
+// bound outside `ty` (the `'a` of `Formatter<'a>` inside `for<'a> fn(&'a mut
+// Formatter<'a>)`), so every such region is erased first.
+fn is_freeze<'tcx>(tcx: TyCtxt<'tcx>, typing_env: TypingEnv<'tcx>, ty: Ty<'tcx>) -> bool {
+  fold_regions(tcx, ty, |_, _| tcx.lifetimes.re_erased).is_freeze(tcx, typing_env)
+}
+
 // A shared borrow of data with interior mutability (`&cell`, `&vec_of_cells`,
 // `&rc`) can mutate that data, so it is treated as a mutable loan.
 fn may_contain_unsafe_cell<'tcx>(
@@ -257,7 +264,7 @@ fn may_contain_unsafe_cell<'tcx>(
       if !self.visited.insert(ty) {
         return ControlFlow::Continue(());
       }
-      if !ty.is_freeze(self.tcx, self.typing_env) {
+      if !is_freeze(self.tcx, self.typing_env, ty) {
         return ControlFlow::Break(());
       }
       // `Freeze` is shallow, so the search goes through pointers. The explicit
