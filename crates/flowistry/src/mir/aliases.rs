@@ -60,6 +60,7 @@ pub struct Aliases<'a, 'tcx> {
   tcx: TyCtxt<'tcx>,
   body: &'a Body<'tcx>,
   pub(super) loans: LoanMap<'tcx>,
+  pub(super) parameter_loans: PlaceSet<'tcx>,
   pub(super) approximate_loans: PlaceSet<'tcx>,
 }
 
@@ -210,6 +211,7 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
     }
 
     // For all args p : &'a ω T where 'a is abstract: contains('a, *p, ω).
+    let mut parameter_loans: PlaceSet<'tcx> = HashSet::default();
     for arg in body.args_iter() {
       for (region, places) in
         Place::from_local(arg, tcx).interior_pointers(tcx, body, def_id)
@@ -221,7 +223,9 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
           // many pointers in the input. This is almost certainly not sound, but hopefully
           // it works for most cases.
           if place.projection.len() <= 2 {
-            region_contains.insert((tcx.mk_place_deref(place), mutability));
+            let pointee = tcx.mk_place_deref(place);
+            region_contains.insert((pointee, mutability));
+            parameter_loans.insert(pointee.normalize(tcx, def_id));
           }
         }
       }
@@ -247,6 +251,7 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
           for place in Self::innermost_places_with_region(tcx, body, def_id, arg, region)
           {
             loans.insert((place, Mutability::Mut));
+            parameter_loans.insert(place.normalize(tcx, def_id));
             approximate_loans.insert(place.normalize(tcx, def_id));
           }
         }
@@ -380,6 +385,7 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
       tcx,
       body,
       loans: contains,
+      parameter_loans,
       approximate_loans,
     }
   }

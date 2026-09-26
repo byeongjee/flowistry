@@ -113,6 +113,13 @@ impl<'a, 'tcx> PlaceInfo<'a, 'tcx> {
     conflicts.chain(provenance).copied().collect()
   }
 
+  pub fn is_parameter_loan(&self, place: Place<'tcx>) -> bool {
+    self
+      .aliases
+      .parameter_loans
+      .contains(&self.normalize(place))
+  }
+
   pub fn is_approximate_loan(&self, place: Place<'tcx>) -> bool {
     self
       .aliases
