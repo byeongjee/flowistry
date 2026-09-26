@@ -57,6 +57,56 @@ where
   pub fn new(place_info: &'a PlaceInfo<'a, 'tcx>, f: F) -> Self {
     ModularMutationVisitor { place_info, f }
   }
+
+  /// Returns the fields of a tuple or of a struct whose fields are all visible.
+  fn fields(&self, place: Place<'tcx>) -> Vec<PlaceElem<'tcx>> {
+    let tcx = self.place_info.tcx;
+    match place.ty(&self.place_info.body.local_decls, tcx).ty.kind() {
+      TyKind::Tuple(tys) => tys
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| PlaceElem::Field(FieldIdx::from_usize(i), ty))
+        .collect(),
+      TyKind::Adt(adt_def, substs)
+        if adt_def.is_struct()
+          && adt_def
+            .all_visible_fields(self.place_info.def_id, tcx)
+            .count()
+            == adt_def.all_fields().count() =>
+      {
+        adt_def
+          .all_fields()
+          .enumerate()
+          .map(|(i, field_def)| {
+            PlaceElem::Field(FieldIdx::from_usize(i), field_def.ty(tcx, substs))
+          })
+          .collect()
+      }
+      _ => Vec::new(),
+    }
+  }
+
+  /// Destructures `mutated = input` into mutations of the innermost fields.
+  fn destructure(&self, mutated: Place<'tcx>, input: Place<'tcx>) -> Vec<Mutation<'tcx>> {
+    let tcx = self.place_info.tcx;
+    let fields = self.fields(input);
+    if fields.is_empty() {
+      return vec![Mutation {
+        mutated,
+        inputs: vec![input],
+        status: MutationStatus::Definitely,
+      }];
+    }
+    fields
+      .into_iter()
+      .flat_map(|field| {
+        self.destructure(
+          mutated.project_deeper(&[field], tcx),
+          input.project_deeper(&[field], tcx),
+        )
+      })
+      .collect()
+  }
 }
 
 impl<'tcx, F> Visitor<'tcx> for ModularMutationVisitor<'_, 'tcx, F>
@@ -76,7 +126,7 @@ where
     match rvalue {
       // In the case of _1 = aggregate { field1: op1, field2: op2, ... },
       // then destructure this into a series of mutations like
-      // _1.field1 = op1, _1.field2 = op2, and so on.
+      // _1.field1 = op1, _1.field2 = op2, and so on, each destructured further.
       Rvalue::Aggregate(agg_kind, ops) => {
         let info = match &**agg_kind {
           AggregateKind::Adt(def_id, idx, substs, _, _) => {
@@ -105,22 +155,21 @@ where
         if let Some((mutated, tys)) = info
           && tys.len() > 0
         {
-          let fields =
-            tys
-              .into_iter()
-              .enumerate()
-              .zip(ops.iter())
-              .map(|((i, ty), input_op)| {
-                let field = PlaceElem::Field(FieldIdx::from_usize(i), ty);
-                let input_place = input_op.as_place();
-                (mutated.project_deeper(&[field], tcx), input_place)
-              });
-
-          let mutations = fields
-            .map(|(mutated, input)| Mutation {
-              mutated,
-              inputs: input.into_iter().collect::<Vec<_>>(),
-              status: MutationStatus::Definitely,
+          let mutations = tys
+            .into_iter()
+            .enumerate()
+            .zip(ops.iter())
+            .flat_map(|((i, ty), input_op)| {
+              let field = PlaceElem::Field(FieldIdx::from_usize(i), ty);
+              let mutated = mutated.project_deeper(&[field], tcx);
+              match input_op.as_place() {
+                Some(input) => self.destructure(mutated, input),
+                None => vec![Mutation {
+                  mutated,
+                  inputs: Vec::new(),
+                  status: MutationStatus::Definitely,
+                }],
+              }
             })
             .collect::<Vec<_>>();
           (self.f)(location, mutations);
@@ -130,41 +179,11 @@ where
 
       // In the case of _1 = _2 where _2 : struct Foo { x: T, y: S, .. },
       // then destructure this into a series of mutations like
-      // _1.x = _2.x, _1.y = _2.y, and so on.
+      // _1.x = _2.x, _1.y = _2.y, and so on, each destructured further.
       Rvalue::Use(Operand::Move(place) | Operand::Copy(place)) => {
-        let place_ty = place.ty(&body.local_decls, tcx).ty;
-        if let TyKind::Adt(adt_def, substs) = place_ty.kind()
-          && adt_def.is_struct()
-          && adt_def
-            .all_visible_fields(self.place_info.def_id, self.place_info.tcx)
-            .count()
-            == adt_def.all_fields().count()
-        {
-          let fields = adt_def.all_fields().enumerate().map(|(i, field_def)| {
-            PlaceElem::Field(FieldIdx::from_usize(i), field_def.ty(tcx, substs))
-          });
-          let mut mutations = fields
-            .map(|field| {
-              let mutated_field = mutated.project_deeper(&[field], tcx);
-              let input_field = place.project_deeper(&[field], tcx);
-              Mutation {
-                mutated: mutated_field,
-                inputs: vec![input_field],
-                status: MutationStatus::Definitely,
-              }
-            })
-            .collect::<Vec<_>>();
-
-          if mutations.is_empty() {
-            mutations.push(Mutation {
-              mutated: *mutated,
-              inputs: vec![*place],
-              status: MutationStatus::Definitely,
-            });
-          }
-          (self.f)(location, mutations);
-          return;
-        }
+        let mutations = self.destructure(*mutated, *place);
+        (self.f)(location, mutations);
+        return;
       }
 
       _ => {}
