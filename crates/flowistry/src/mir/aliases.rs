@@ -16,7 +16,7 @@ use rustc_index::{
 };
 use rustc_middle::{
   mir::{visit::Visitor, *},
-  ty::{Region, RegionKind, RegionVid, Ty, TyCtxt, TyKind},
+  ty::{Region, RegionKind, RegionVid, Ty, TyCtxt, TyKind, fold_regions},
 };
 use rustc_utils::{PlaceExt, mir::place::UNKNOWN_REGION, timer::elapsed};
 
@@ -60,6 +60,10 @@ pub struct Aliases<'a, 'tcx> {
   tcx: TyCtxt<'tcx>,
   body: &'a Body<'tcx>,
   pub(super) loans: LoanMap<'tcx>,
+}
+
+fn erase_regions<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
+  fold_regions(tcx, ty, |_, _| tcx.lifetimes.re_erased)
 }
 
 rustc_index::newtype_index! {
@@ -314,7 +318,7 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
               Some((ty, proj)) if !cyclic => {
                 for (p, mutability) in a_contains.iter() {
                   let p_ty = p.ty(body.local_decls(), tcx).ty;
-                  let p_proj = if *ty == p_ty {
+                  let p_proj = if erase_regions(tcx, *ty) == erase_regions(tcx, p_ty) {
                     let mut full_proj = p.projection.to_vec();
                     full_proj.extend(proj);
                     Place::make(p.local, tcx.mk_place_elems(&full_proj), tcx)
@@ -407,7 +411,7 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
       .flatten();
     let region_aliases = region_loans.map(|(loan, _)| {
       let loan_ty = loan.ty(self.body.local_decls(), self.tcx).ty;
-      if orig_ty == loan_ty {
+      if erase_regions(self.tcx, orig_ty) == erase_regions(self.tcx, loan_ty) {
         let mut projection = loan.projection.to_vec();
         projection.extend(after.iter().copied());
         Place::make(loan.local, &projection, self.tcx)
