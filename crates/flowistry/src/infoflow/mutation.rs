@@ -135,13 +135,14 @@ where
         let place_ty = place.ty(&body.local_decls, tcx).ty;
         if let TyKind::Adt(adt_def, substs) = place_ty.kind()
           && adt_def.is_struct()
-        {
-          let fields = adt_def
+          && adt_def
             .all_visible_fields(self.place_info.def_id, self.place_info.tcx)
-            .enumerate()
-            .map(|(i, field_def)| {
-              PlaceElem::Field(FieldIdx::from_usize(i), field_def.ty(tcx, substs))
-            });
+            .count()
+            == adt_def.all_fields().count()
+        {
+          let fields = adt_def.all_fields().enumerate().map(|(i, field_def)| {
+            PlaceElem::Field(FieldIdx::from_usize(i), field_def.ty(tcx, substs))
+          });
           let mut mutations = fields
             .map(|field| {
               let mutated_field = mutated.project_deeper(&[field], tcx);
