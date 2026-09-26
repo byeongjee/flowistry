@@ -246,7 +246,7 @@ fn is_freeze<'tcx>(tcx: TyCtxt<'tcx>, typing_env: TypingEnv<'tcx>, ty: Ty<'tcx>)
 
 // A shared borrow of data with interior mutability (`&cell`, `&vec_of_cells`,
 // `&rc`) can mutate that data, so it is treated as a mutable loan.
-fn may_contain_unsafe_cell<'tcx>(
+pub fn may_contain_unsafe_cell<'tcx>(
   tcx: TyCtxt<'tcx>,
   typing_env: TypingEnv<'tcx>,
   ty: Ty<'tcx>,
