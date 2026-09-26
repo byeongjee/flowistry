@@ -113,6 +113,13 @@ impl<'a, 'tcx> PlaceInfo<'a, 'tcx> {
     conflicts.chain(provenance).copied().collect()
   }
 
+  pub fn is_approximate_loan(&self, place: Place<'tcx>) -> bool {
+    self
+      .aliases
+      .approximate_loans
+      .contains(&self.normalize(place))
+  }
+
   /// Returns all reachable fields of `place` without going through references.
   ///
   /// For example, if `x = (0, 1)` then `children(x) = {x, x.0, x.1}`.

@@ -16,7 +16,7 @@ use rustc_index::{
 };
 use rustc_middle::{
   mir::{visit::Visitor, *},
-  ty::{Region, RegionKind, RegionVid, Ty, TyCtxt, TyKind, fold_regions},
+  ty::{GenericArgKind, Region, RegionKind, RegionVid, Ty, TyCtxt, TyKind, fold_regions},
 };
 use rustc_utils::{PlaceExt, mir::place::UNKNOWN_REGION, timer::elapsed};
 
@@ -60,10 +60,18 @@ pub struct Aliases<'a, 'tcx> {
   tcx: TyCtxt<'tcx>,
   body: &'a Body<'tcx>,
   pub(super) loans: LoanMap<'tcx>,
+  pub(super) approximate_loans: PlaceSet<'tcx>,
 }
 
 fn erase_regions<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
   fold_regions(tcx, ty, |_, _| tcx.lifetimes.re_erased)
+}
+
+fn regions<'tcx>(ty: Ty<'tcx>) -> impl Iterator<Item = RegionVid> {
+  ty.walk().filter_map(|generic| match generic.kind() {
+    GenericArgKind::Lifetime(region_pat!(region)) => Some(*region),
+    _ => None,
+  })
 }
 
 rustc_index::newtype_index! {
@@ -79,12 +87,7 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
     def_id: DefId,
     body_with_facts: &'a BodyWithBorrowckFacts<'tcx>,
   ) -> Self {
-    let loans = Self::compute_loans(tcx, def_id, body_with_facts, |_, _, _| true);
-    Aliases {
-      tcx,
-      body: &body_with_facts.body,
-      loans,
-    }
+    Self::compute_loans(tcx, def_id, body_with_facts, |_, _, _| true)
   }
 
   /// Alternative constructor if you need to filter out certain borrowck facts.
@@ -96,12 +99,7 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
     body_with_facts: &'a BodyWithBorrowckFacts<'tcx>,
     selector: impl Fn(RegionVid, RegionVid, BorrowckLocationIndex) -> bool,
   ) -> Self {
-    let loans = Self::compute_loans(tcx, def_id, body_with_facts, selector);
-    Aliases {
-      tcx,
-      body: &body_with_facts.body,
-      loans,
-    }
+    Self::compute_loans(tcx, def_id, body_with_facts, selector)
   }
 
   fn compute_loans(
@@ -109,7 +107,7 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
     def_id: DefId,
     body_with_facts: &'a BodyWithBorrowckFacts<'tcx>,
     constraint_selector: impl Fn(RegionVid, RegionVid, BorrowckLocationIndex) -> bool,
-  ) -> LoanMap<'tcx> {
+  ) -> Self {
     let start = Instant::now();
     let body = &body_with_facts.body;
     let static_region = RegionVid::from_usize(0);
@@ -224,6 +222,32 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
           // it works for most cases.
           if place.projection.len() <= 2 {
             region_contains.insert((tcx.mk_place_deref(place), mutability));
+          }
+        }
+      }
+    }
+
+    // A region 'a of an arg type with no p : &'a T has no loans. For example:
+    //
+    //   fn set_all(targets: &'b mut Vec<&'a mut u32>, value: u32) {
+    //     for target in targets { **target = value; }
+    //   }
+    //
+    // Here 'a has no loans, so the write through 'a would not be tracked.
+    // In this case, the loans of 'a are approximated by the innermost places of the
+    // arg whose type mentions 'a, here *targets.
+    let mut approximate_loans: PlaceSet<'tcx> = HashSet::default();
+    for arg in body.args_iter() {
+      let arg = Place::from_local(arg, tcx);
+      let arg_ty = arg.ty(body.local_decls(), tcx).ty;
+      for region in regions(arg_ty) {
+        let loans = contains.entry(region).or_default();
+        let outlives_static = subset.contains(region, static_region);
+        if loans.is_empty() && !outlives_static {
+          for place in Self::innermost_places_with_region(tcx, body, def_id, arg, region)
+          {
+            loans.insert((place, Mutability::Mut));
+            approximate_loans.insert(place.normalize(tcx, def_id));
           }
         }
       }
@@ -352,7 +376,37 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
 
     log::trace!("contains: {contains:#?}");
 
-    contains
+    Aliases {
+      tcx,
+      body,
+      loans: contains,
+      approximate_loans,
+    }
+  }
+
+  fn innermost_places_with_region(
+    tcx: TyCtxt<'tcx>,
+    body: &Body<'tcx>,
+    def_id: DefId,
+    arg: Place<'tcx>,
+    region: RegionVid,
+  ) -> Vec<Place<'tcx>> {
+    let mentions_region = |place: &Place<'tcx>| {
+      regions(place.ty(body.local_decls(), tcx).ty).any(|r| r == region)
+    };
+    let places = arg.interior_paths(tcx, body, def_id);
+    places
+      .iter()
+      .copied()
+      .filter(|place| {
+        mentions_region(place)
+          && !places.iter().any(|inner| {
+            inner != place
+              && inner.projection.starts_with(place.projection)
+              && mentions_region(inner)
+          })
+      })
+      .collect()
   }
 
   /// Given a `place`, returns the set of direct places it could refer to.
