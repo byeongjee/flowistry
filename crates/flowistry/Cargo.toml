@@ -11,10 +11,11 @@ license = "MIT"
 rustc_private = true
 
 [features]
-test = ["rustc_utils/test"]
+test = ["rustc_utils/test", "preborrowck-mir/test"]
 debug = ["html-escape"]
 
 [dependencies]
+preborrowck-mir = { git = "https://github.com/byeongjee/preborrowck-mir.git", rev = "71feaeae4c3d73888c6650c6bbaa030efd5a9231" }
 anyhow = "1"
 log = "0.4"
 fluid-let = "1.0"

@@ -1,12 +1,13 @@
 #![allow(unused)]
 
 use log::{debug, info};
+use preborrowck_mir::borrowck_facts;
 use rustc_middle::{
   mir::*,
   ty::{ClosureKind, GenericArgKind, TyKind},
 };
 use rustc_mir_dataflow::JoinSemiLattice;
-use rustc_utils::{PlaceExt, mir::borrowck_facts::get_body_with_borrowck_facts};
+use rustc_utils::PlaceExt;
 
 use super::{BODY_STACK, analysis::FlowAnalysis};
 use crate::{
@@ -117,7 +118,7 @@ impl<'tcx> FlowAnalysis<'_, 'tcx> {
       return false;
     }
 
-    let body_with_facts = get_body_with_borrowck_facts(tcx, def_id.expect_local());
+    let body_with_facts = borrowck_facts(tcx, def_id.expect_local());
     let mut recurse_cache = self.recurse_cache.borrow_mut();
     let flow = recurse_cache.entry(body_id).or_insert_with(|| {
       info!("Recursing into {}", tcx.def_path_debug_str(*def_id));

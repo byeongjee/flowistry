@@ -15,7 +15,7 @@ use crate::mir::{
 
 /// Indicator of certainty about whether a place is being mutated.
 /// Used to determine whether an update should be strong or weak.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum MutationStatus {
   /// A place is definitely mutated, e.g. `x = y` definitely mutates `x`.
   Definitely,
@@ -63,6 +63,13 @@ where
     let tcx = self.place_info.tcx;
     match place.ty(&self.place_info.body.local_decls, tcx).ty.kind() {
       TyKind::Tuple(tys) => tys
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| PlaceElem::Field(FieldIdx::from_usize(i), ty))
+        .collect(),
+      TyKind::Closure(_, args) => args
+        .as_closure()
+        .upvar_tys()
         .iter()
         .enumerate()
         .map(|(i, ty)| PlaceElem::Field(FieldIdx::from_usize(i), ty))
@@ -149,19 +156,28 @@ where
             let ty = rvalue.ty(body.local_decls(), tcx);
             Some((*mutated, ty.tuple_fields().to_vec()))
           }
+          AggregateKind::Closure(_, args) => {
+            Some((*mutated, args.as_closure().upvar_tys().to_vec()))
+          }
           _ => None,
         };
 
-        if let Some((mutated, tys)) = info
+        if let Some((fields_place, tys)) = info
           && tys.len() > 0
         {
-          let mutations = tys
-            .into_iter()
-            .enumerate()
-            .zip(ops.iter())
-            .flat_map(|((i, ty), input_op)| {
+          let discriminant_write = matches!(
+            **agg_kind,
+            AggregateKind::Adt(def_id, ..) if tcx.adt_def(def_id).is_enum()
+          )
+          .then(|| Mutation {
+            mutated: *mutated,
+            inputs: Vec::new(),
+            status: MutationStatus::Definitely,
+          });
+          let fields = tys.into_iter().enumerate().zip(ops.iter()).flat_map(
+            |((i, ty), input_op)| {
               let field = PlaceElem::Field(FieldIdx::from_usize(i), ty);
-              let mutated = mutated.project_deeper(&[field], tcx);
+              let mutated = fields_place.project_deeper(&[field], tcx);
               match input_op.as_place() {
                 Some(input) => self.destructure(mutated, input),
                 None => vec![Mutation {
@@ -170,7 +186,11 @@ where
                   status: MutationStatus::Definitely,
                 }],
               }
-            })
+            },
+          );
+          let mutations = discriminant_write
+            .into_iter()
+            .chain(fields)
             .collect::<Vec<_>>();
           (self.f)(location, mutations);
           return;

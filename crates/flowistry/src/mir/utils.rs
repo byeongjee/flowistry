@@ -4,7 +4,7 @@ use rustc_data_structures::fx::FxHashSet as HashSet;
 use rustc_hir::def_id::DefId;
 use rustc_middle::{
   mir::*,
-  ty::{GenericArgKind, RegionKind, RegionVid, Ty, TyCtxt},
+  ty::{GenericArgKind, RegionKind, RegionVid, Ty, TyCtxt, TypingEnv, Unnormalized},
 };
 use rustc_span::Spanned;
 use rustc_utils::{BodyExt, OperandExt, PlaceExt};
@@ -17,6 +17,29 @@ use crate::extensions::{MutabilityMode, is_extension_active};
 /// but in practice it was very hard to determine up-front a fixed domain of
 /// [`Place`]s that was not "every possible place in the body".
 pub type PlaceSet<'tcx> = HashSet<Place<'tcx>>;
+
+/// Normalizes the types in a place with `typing_env`, maps every index to `[0]`,
+/// and drops subslices, so that places that refer to the same memory are equal.
+pub fn normalize_place<'tcx>(
+  tcx: TyCtxt<'tcx>,
+  typing_env: TypingEnv<'tcx>,
+  place: Place<'tcx>,
+) -> Place<'tcx> {
+  let place: Place<'tcx> =
+    tcx.normalize_erasing_regions(typing_env, Unnormalized::new_wip(place));
+  let projection: Vec<PlaceElem<'tcx>> = place
+    .projection
+    .into_iter()
+    .filter_map(|elem| match elem {
+      ProjectionElem::Index(_) | ProjectionElem::ConstantIndex { .. } => {
+        Some(ProjectionElem::Index(Local::from_usize(0)))
+      }
+      ProjectionElem::Subslice { .. } => None,
+      _ => Some(elem),
+    })
+    .collect();
+  Place::make(place.local, &projection, tcx)
+}
 
 /// Given the arguments to a function, returns all projections of the arguments that are mutable pointers.
 pub fn arg_mut_ptrs<'tcx>(

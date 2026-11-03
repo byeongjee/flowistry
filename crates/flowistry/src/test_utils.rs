@@ -7,20 +7,18 @@ use std::{cell::RefCell, fs, io, panic, path::Path};
 use anyhow::Result;
 use fluid_let::fluid_set;
 use log::info;
+use preborrowck_mir::{borrowck_facts, test_utils::Compile};
 use rustc_borrowck::consumers::BodyWithBorrowckFacts;
 use rustc_data_structures::fx::FxHashSet as HashSet;
 use rustc_hir::BodyId;
 use rustc_middle::ty::TyCtxt;
 use rustc_span::Span;
-pub use rustc_utils::test_utils::{compare_ranges, fmt_ranges, parse_ranges};
-use rustc_utils::{
-  mir::borrowck_facts,
-  source_map::{
-    range::{ByteRange, CharPos, ToSpan},
-    spanner::Spanner,
-  },
-  test_utils::{self, CompileBuilder},
+use rustc_utils::source_map::{
+  find_bodies::{find_bodies, find_enclosing_bodies},
+  range::{ByteRange, CharPos, ToSpan},
+  spanner::Spanner,
 };
+pub use rustc_utils::test_utils::{compare_ranges, fmt_ranges, parse_ranges};
 
 use crate::{
   extensions::{ContextMode, EVAL_MODE, EvalMode, MutabilityMode, PointerMode},
@@ -37,11 +35,15 @@ pub fn compile_body_with_range(
     ByteRange,
   ) + Send,
 ) {
-  borrowck_facts::enable_mir_simplification();
-  CompileBuilder::new(input).compile(|result| {
+  Compile::source(input).run(|tcx| {
     let target = compute_target();
-    let tcx = result.tcx;
-    let (body_id, body_with_facts) = result.as_body_with_range(target);
+    let target_span = target
+      .to_span(tcx)
+      .expect("the target range is in the source");
+    let body_id = find_enclosing_bodies(tcx, target_span)
+      .next()
+      .expect("a body encloses the target range");
+    let body_with_facts = borrowck_facts(tcx, tcx.hir_body_owner_def_id(body_id));
     callback(tcx, body_id, body_with_facts, target)
   })
 }
@@ -50,8 +52,14 @@ pub fn compile_body(
   input: impl Into<String>,
   callback: impl for<'tcx> FnOnce(TyCtxt<'tcx>, BodyId, &BodyWithBorrowckFacts<'tcx>) + Send,
 ) {
-  borrowck_facts::enable_mir_simplification();
-  test_utils::compile_body(input, callback)
+  Compile::source(input).run(|tcx| {
+    let (_, body_id) = find_bodies(tcx)
+      .into_iter()
+      .next()
+      .expect("the source defines a body");
+    let body_with_facts = borrowck_facts(tcx, tcx.hir_body_owner_def_id(body_id));
+    callback(tcx, body_id, body_with_facts)
+  })
 }
 
 pub fn bless(

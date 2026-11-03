@@ -72,7 +72,7 @@ thread_local! {
 /// for a complete example of how to call this function.
 ///
 /// To get a `BodyWithBorrowckFacts`, you can use the
-/// [`get_body_with_borrowck_facts`](rustc_utils::mir::borrowck_facts::get_body_with_borrowck_facts)
+/// [`borrowck_facts`](preborrowck_mir::borrowck_facts)
 /// function.
 ///
 /// See [`FlowResults`] for an explanation of how to use the return value.
@@ -86,7 +86,12 @@ pub fn compute_flow<'a, 'tcx>(
     debug!("{}", body_with_facts.body.to_string(tcx).unwrap());
 
     let def_id = tcx.hir_body_owner_def_id(body_id).to_def_id();
-    let place_info = PlaceInfo::build(tcx, def_id, body_with_facts);
+    let place_info = PlaceInfo::build(
+      tcx,
+      def_id,
+      tcx.typing_env_normalized_for_post_analysis(def_id),
+      body_with_facts,
+    );
     let location_domain = place_info.location_domain().clone();
 
     let body = &body_with_facts.body;

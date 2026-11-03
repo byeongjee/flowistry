@@ -16,13 +16,16 @@ use rustc_index::{
 };
 use rustc_middle::{
   mir::{visit::Visitor, *},
-  ty::{GenericArgKind, Region, RegionKind, RegionVid, Ty, TyCtxt, TyKind, fold_regions},
+  ty::{
+    GenericArgKind, Region, RegionKind, RegionVid, Ty, TyCtxt, TyKind, TypingEnv,
+    fold_regions,
+  },
 };
 use rustc_utils::{PlaceExt, mir::place::UNKNOWN_REGION, timer::elapsed};
 
 use crate::{
   extensions::{PointerMode, is_extension_active},
-  mir::utils::{AsyncHack, PlaceSet},
+  mir::utils::{AsyncHack, PlaceSet, normalize_place},
 };
 
 type BorrowckLocationIndex =
@@ -59,9 +62,11 @@ type LoanMap<'tcx> = HashMap<RegionVid, LoanSet<'tcx>>;
 pub struct Aliases<'a, 'tcx> {
   tcx: TyCtxt<'tcx>,
   body: &'a Body<'tcx>,
+  static_region: RegionVid,
   pub(super) loans: LoanMap<'tcx>,
   pub(super) parameter_loans: PlaceSet<'tcx>,
   pub(super) approximate_loans: PlaceSet<'tcx>,
+  pub(super) argument_pointees: Vec<Place<'tcx>>,
 }
 
 fn erase_regions<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Ty<'tcx> {
@@ -86,9 +91,16 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
   pub fn build(
     tcx: TyCtxt<'tcx>,
     def_id: DefId,
+    typing_env: TypingEnv<'tcx>,
     body_with_facts: &'a BodyWithBorrowckFacts<'tcx>,
   ) -> Self {
-    Self::compute_loans(tcx, def_id, body_with_facts, |_, _, _| true)
+    Self::build_with_fact_selection(
+      tcx,
+      def_id,
+      typing_env,
+      body_with_facts,
+      |_, _, _| true,
+    )
   }
 
   /// Alternative constructor if you need to filter out certain borrowck facts.
@@ -97,29 +109,38 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
   pub fn build_with_fact_selection(
     tcx: TyCtxt<'tcx>,
     def_id: DefId,
+    typing_env: TypingEnv<'tcx>,
     body_with_facts: &'a BodyWithBorrowckFacts<'tcx>,
     selector: impl Fn(RegionVid, RegionVid, BorrowckLocationIndex) -> bool,
   ) -> Self {
-    Self::compute_loans(tcx, def_id, body_with_facts, selector)
-  }
-
-  fn compute_loans(
-    tcx: TyCtxt<'tcx>,
-    def_id: DefId,
-    body_with_facts: &'a BodyWithBorrowckFacts<'tcx>,
-    constraint_selector: impl Fn(RegionVid, RegionVid, BorrowckLocationIndex) -> bool,
-  ) -> Self {
-    let start = Instant::now();
-    let body = &body_with_facts.body;
-    let static_region = RegionVid::from_usize(0);
     let input_facts = &body_with_facts.input_facts.as_ref().unwrap();
     let subset_base = input_facts
       .subset_base
       .iter()
       .cloned()
       .map(|(r1, r2, i)| (RegionVid::from(r1), RegionVid::from(r2), i))
-      .filter(|(r1, r2, i)| constraint_selector(*r1, *r2, *i))
+      .filter(|(r1, r2, i)| selector(*r1, *r2, *i))
+      .map(|(r1, r2, _)| (r1, r2))
       .collect::<Vec<_>>();
+    Self::build_from_subset_base(
+      tcx,
+      def_id,
+      typing_env,
+      &body_with_facts.body,
+      subset_base,
+    )
+  }
+
+  /// Runs the alias analysis on a `body` whose region constraints are `subset_base`.
+  pub fn build_from_subset_base(
+    tcx: TyCtxt<'tcx>,
+    def_id: DefId,
+    typing_env: TypingEnv<'tcx>,
+    body: &'a Body<'tcx>,
+    subset_base: Vec<(RegionVid, RegionVid)>,
+  ) -> Self {
+    let start = Instant::now();
+    let static_region = RegionVid::from_usize(0);
 
     let all_pointers = body
       .local_decls()
@@ -131,7 +152,7 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
     let max_region = all_pointers
       .iter()
       .map(|(region, _)| *region)
-      .chain(subset_base.iter().flat_map(|(r1, r2, _)| [*r1, *r2]))
+      .chain(subset_base.iter().flat_map(|(r1, r2)| [*r1, *r2]))
       .filter(|r| *r != UNKNOWN_REGION)
       .max()
       .unwrap_or(static_region);
@@ -144,7 +165,7 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
     let ignore_regions = async_hack.ignore_regions();
 
     // subset('a, 'b) :- subset_base('a, 'b, _).
-    for (a, b, _) in subset_base {
+    for (a, b) in subset_base {
       if ignore_regions.contains(&a) || ignore_regions.contains(&b) {
         continue;
       }
@@ -168,11 +189,7 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
         }
       }
 
-      let constraints = generate_conservative_constraints(
-        tcx,
-        &body_with_facts.body,
-        &region_to_pointers,
-      );
+      let constraints = generate_conservative_constraints(tcx, body, &region_to_pointers);
 
       for (a, b) in constraints {
         subset.insert(a, b);
@@ -212,20 +229,21 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
 
     // For all args p : &'a ω T where 'a is abstract: contains('a, *p, ω).
     let mut parameter_loans: PlaceSet<'tcx> = HashSet::default();
-    for arg in body.args_iter() {
-      for (region, places) in
-        Place::from_local(arg, tcx).interior_pointers(tcx, body, def_id)
-      {
-        let region_contains = contains.entry(region).or_default();
-        for (place, mutability) in places {
+    let mut argument_pointees = Vec::new();
+    for (region, places) in &all_pointers {
+      // Each group comes from one local's original pointer traversal.
+      if places.first().is_some_and(|(place, _)| place.is_arg(body)) {
+        let region_contains = contains.entry(*region).or_default();
+        for &(place, mutability) in places {
           // WARNING / TODO: this is a huge hack (that is conjoined w/ all_args).
           // Need a way to limit the number of possible pointers for functions with
           // many pointers in the input. This is almost certainly not sound, but hopefully
           // it works for most cases.
-          if place.projection.len() <= 2 {
+          if place.projection.len() <= 3 {
             let pointee = tcx.mk_place_deref(place);
+            argument_pointees.push(pointee);
             region_contains.insert((pointee, mutability));
-            parameter_loans.insert(pointee.normalize(tcx, def_id));
+            parameter_loans.insert(normalize_place(tcx, typing_env, pointee));
           }
         }
       }
@@ -384,9 +402,11 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
     Aliases {
       tcx,
       body,
+      static_region,
       loans: contains,
       parameter_loans,
       approximate_loans,
+      argument_pointees,
     }
   }
 
@@ -457,6 +477,9 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
       TyKind::Ref(Region(Interned(RegionKind::ReVar(region), _)), ty, _) => {
         (*region, *ty)
       }
+      // Normalizing a field declaration can expose a literal 'static lifetime.
+      // It denotes the same universal region used by the subset graph.
+      TyKind::Ref(region, ty, _) if region.is_static() => (self.static_region, *ty),
       _ => return aliases,
     };
 
@@ -537,7 +560,12 @@ mod test {
     test_utils::compile_body(input, |tcx, body_id, body_with_facts| {
       let body = &body_with_facts.body;
       let def_id = tcx.hir_body_owner_def_id(body_id);
-      let aliases = Aliases::build(tcx, def_id.to_def_id(), body_with_facts);
+      let aliases = Aliases::build(
+        tcx,
+        def_id.to_def_id(),
+        tcx.typing_env_normalized_for_post_analysis(def_id),
+        body_with_facts,
+      );
 
       f(tcx, body, aliases)
     });

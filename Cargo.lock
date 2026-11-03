@@ -385,6 +385,7 @@ dependencies = [
  "html-escape",
  "indexical",
  "log",
+ "preborrowck-mir",
  "rustc_utils",
  "serde",
  "smallvec",
@@ -727,6 +728,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51bae2ac328883f7acdfea3d66a7c35751187f870bc81f94563733a154d7a670"
 dependencies = [
  "plotters-backend",
+]
+
+[[package]]
+name = "preborrowck-mir"
+version = "0.0.0"
+source = "git+https://github.com/byeongjee/preborrowck-mir.git?rev=71feaeae4c3d73888c6650c6bbaa030efd5a9231#71feaeae4c3d73888c6650c6bbaa030efd5a9231"
+dependencies = [
+ "rustc_utils",
 ]
 
 [[package]]
