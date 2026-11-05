@@ -11,9 +11,11 @@ body whose regions are region variables, the outlives constraints between them, 
 typing env. Upstream takes only the borrowck facts of a local function. So the fork also
 analyzes bodies that rustc does not borrowck, such as monomorphized instances.
 
-**Aliases and mutations are sound.** The fork keeps two kinds that upstream drops:
+**Aliases and mutations are sound.** The fork keeps three kinds that upstream drops:
 
 - Writes through a shared reference to data that may contain an `UnsafeCell`, such as
   `&Cell<T>`, `&RefCell<T>`, and `&Rc<T>`. Only these types lose precision.
 - Loans of an argument region that no reference place has. They are approximated by the
   innermost places of the argument whose type mentions the region.
+- The pointee of a raw pointer. A raw pointer may point anywhere, so it reaches every
+  place of the body. Upstream treats it like a `Box`, which points only into the heap.
