@@ -451,8 +451,14 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
     let mut aliases = HashSet::default();
     aliases.insert(place);
 
-    // Places with no derefs, or derefs from arguments, have no aliases
-    if place.is_direct(self.body, self.tcx) {
+    // Places with no derefs of a reference or raw pointer have no aliases.
+    // A place behind an argument pointer is resolved through its region too,
+    // since the function can store another pointer into the argument.
+    if place
+      .refs_in_projection(self.body, self.tcx)
+      .next()
+      .is_none()
+    {
       return aliases;
     }
 
