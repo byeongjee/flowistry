@@ -236,16 +236,10 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
       if places.first().is_some_and(|(place, _)| place.is_arg(body)) {
         let region_contains = contains.entry(*region).or_default();
         for &(place, mutability) in places {
-          // WARNING / TODO: this is a huge hack (that is conjoined w/ all_args).
-          // Need a way to limit the number of possible pointers for functions with
-          // many pointers in the input. This is almost certainly not sound, but hopefully
-          // it works for most cases.
-          if place.projection.len() <= 3 {
-            let pointee = tcx.mk_place_deref(place);
-            argument_pointees.push(pointee);
-            region_contains.insert((pointee, mutability));
-            parameter_loans.insert(normalize_place(tcx, typing_env, pointee));
-          }
+          let pointee = tcx.mk_place_deref(place);
+          argument_pointees.push(pointee);
+          region_contains.insert((pointee, mutability));
+          parameter_loans.insert(normalize_place(tcx, typing_env, pointee));
         }
       }
     }

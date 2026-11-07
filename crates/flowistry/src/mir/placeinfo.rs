@@ -609,7 +609,6 @@ fn fixture(
             .interior_pointers(tcx, body, place_info.def_id)
             .into_values()
             .flatten()
-            .filter(|(pointer, _)| pointer.projection.len() <= 3)
             .map(|(pointer, _)| tcx.mk_place_deref(pointer));
           pointers
             .chain([place])
