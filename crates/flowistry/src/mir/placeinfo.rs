@@ -26,7 +26,7 @@ use rustc_utils::{
 };
 use smallvec::SmallVec;
 
-use super::{aliases::Aliases, utils::PlaceSet};
+use super::{aliases::Aliases, interior, utils::PlaceSet};
 use crate::extensions::{MutabilityMode, is_extension_active};
 
 /// Utilities for analyzing places: children, aliases, etc.
@@ -191,7 +191,12 @@ impl<'a, 'tcx> PlaceInfo<'a, 'tcx> {
   ///
   /// For example, if `x = (0, 1)` then `children(x) = {x, x.0, x.1}`.
   pub fn children(&self, place: Place<'tcx>) -> PlaceSet<'tcx> {
-    PlaceSet::from_iter(place.interior_places(self.tcx, self.body, self.def_id))
+    PlaceSet::from_iter(interior::interior_places(
+      place,
+      self.tcx,
+      self.body,
+      self.def_id,
+    ))
   }
 
   /// Whether `children(place)` contains only `place` (cached by type).
@@ -378,7 +383,9 @@ impl<'a, 'tcx> PlaceInfo<'a, 'tcx> {
               .copied();
             ptrs
               .chain([place])
-              .flat_map(|place| place.interior_places(self.tcx, self.body, self.def_id))
+              .flat_map(|place| {
+                interior::interior_places(place, self.tcx, self.body, self.def_id)
+              })
               .map(move |place| (place, location))
           })
           .collect()
@@ -476,7 +483,7 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for LoanCollector<'_, 'tcx> {
       _ if ty.is_raw_ptr() => {
         self
           .loans
-          .extend(self.body.all_places(self.tcx, self.def_id));
+          .extend(interior::all_places(self.body, self.tcx, self.def_id));
       }
       _ if ty.is_box() => {
         self.visit_region(self.unknown_region)?;
@@ -605,14 +612,15 @@ fn fixture(
         .flat_map(|local| {
           let location = local.to_index(&place_info.location_domain);
           let place = Place::from_local(local, tcx);
-          let pointers = place
-            .interior_pointers(tcx, body, place_info.def_id)
+          let pointers = interior::interior_pointers(place, tcx, body, place_info.def_id)
             .into_values()
             .flatten()
             .map(|(pointer, _)| tcx.mk_place_deref(pointer));
           pointers
             .chain([place])
-            .flat_map(|place| place.interior_places(tcx, body, place_info.def_id))
+            .flat_map(|place| {
+              interior::interior_places(place, tcx, body, place_info.def_id)
+            })
             .map(move |place| (place, location))
         })
         .collect();

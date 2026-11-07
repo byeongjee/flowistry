@@ -21,11 +21,14 @@ use rustc_middle::{
     fold_regions,
   },
 };
-use rustc_utils::{BodyExt, PlaceExt, mir::place::UNKNOWN_REGION, timer::elapsed};
+use rustc_utils::{PlaceExt, mir::place::UNKNOWN_REGION, timer::elapsed};
 
 use crate::{
   extensions::{PointerMode, is_extension_active},
-  mir::utils::{AsyncHack, PlaceSet, normalize_place},
+  mir::{
+    interior,
+    utils::{AsyncHack, PlaceSet, normalize_place},
+  },
 };
 
 type BorrowckLocationIndex =
@@ -147,7 +150,7 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
       .local_decls()
       .indices()
       .flat_map(|local| {
-        Place::from_local(local, tcx).interior_pointers(tcx, body, def_id)
+        interior::interior_pointers(Place::from_local(local, tcx), tcx, body, def_id)
       })
       .collect::<Vec<_>>();
     let max_region = all_pointers
@@ -416,7 +419,7 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
     let mentions_region = |place: &Place<'tcx>| {
       regions(place.ty(body.local_decls(), tcx).ty).any(|r| r == region)
     };
-    let places = arg.interior_paths(tcx, body, def_id);
+    let places = interior::interior_paths(arg, tcx, body, def_id);
     places
       .iter()
       .copied()
@@ -472,7 +475,7 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
 
     // A raw pointer may point anywhere.
     if ptr_ty.is_raw_ptr() {
-      aliases.extend(self.body.all_places(self.tcx, self.def_id));
+      aliases.extend(interior::all_places(self.body, self.tcx, self.def_id));
       return aliases;
     }
 

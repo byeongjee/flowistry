@@ -9,6 +9,7 @@ use rustc_middle::{
 use rustc_span::Spanned;
 use rustc_utils::{BodyExt, OperandExt, PlaceExt};
 
+use super::interior;
 use crate::extensions::{MutabilityMode, is_extension_active};
 
 /// An unordered collections of MIR [`Place`]s.
@@ -53,8 +54,7 @@ pub fn arg_mut_ptrs<'tcx>(
   args
     .iter()
     .flat_map(|(i, place)| {
-      place
-        .interior_pointers(tcx, body, def_id)
+      interior::interior_pointers(*place, tcx, body, def_id)
         .into_values()
         .flat_map(|places| {
           places

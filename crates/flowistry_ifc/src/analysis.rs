@@ -3,7 +3,10 @@
 use std::io::Write;
 
 use anyhow::Result;
-use flowistry::{infoflow::FlowResults, mir::utils::PlaceSet};
+use flowistry::{
+  infoflow::FlowResults,
+  mir::{interior, utils::PlaceSet},
+};
 use rustc_data_structures::fx::FxHashMap as HashMap;
 use rustc_hir::{BodyId, def::Res, def_id::DefId};
 use rustc_infer::traits::EvaluationResult;
@@ -79,7 +82,7 @@ pub fn analyze(body_id: &BodyId, results: &FlowResults) -> Result<IssueFound> {
     .indices()
     .flat_map(|local| {
       let place = Place::from_local(local, tcx);
-      place.interior_places(tcx, body, def_id)
+      interior::interior_places(place, tcx, body, def_id)
     })
     .collect::<PlaceSet>();
 

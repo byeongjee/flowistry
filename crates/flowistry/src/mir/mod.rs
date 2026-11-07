@@ -2,5 +2,6 @@
 
 pub mod aliases;
 pub mod engine;
+pub mod interior;
 pub mod placeinfo;
 pub mod utils;
