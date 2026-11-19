@@ -362,7 +362,6 @@ impl<'a, 'tcx> PlaceInfo<'a, 'tcx> {
       aliases: &self.aliases,
       tcx: self.tcx,
       body: self.body,
-      def_id: self.def_id,
       typing_env: self.body.typing_env(self.tcx),
       unknown_region: Region::new_var(self.tcx, UNKNOWN_REGION),
       target_mutability: mutability,
@@ -418,7 +417,6 @@ struct LoanCollector<'a, 'tcx> {
   aliases: &'a Aliases<'a, 'tcx>,
   tcx: TyCtxt<'tcx>,
   body: &'a Body<'tcx>,
-  def_id: DefId,
   typing_env: TypingEnv<'tcx>,
   unknown_region: Region<'tcx>,
   target_mutability: Mutability,
@@ -491,12 +489,7 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for LoanCollector<'_, 'tcx> {
         ty.super_visit_with(self)?;
         self.stack.pop();
       }
-      // A raw pointer may point anywhere.
-      _ if ty.is_raw_ptr() => {
-        self
-          .loans
-          .extend(interior::all_places(self.body, self.tcx, self.def_id));
-      }
+      TyKind::RawPtr(..) => {}
       _ if ty.is_box() => {
         self.visit_region(self.unknown_region)?;
         ty.super_visit_with(self)?;
