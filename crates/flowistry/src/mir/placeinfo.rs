@@ -256,7 +256,7 @@ impl<'a, 'tcx> PlaceInfo<'a, 'tcx> {
       self.tcx,
     )
     .ty;
-    shared.is_union() || shared.is_enum()
+    shared.is_union()
   }
 
   pub fn is_one_location(&self, place: Place<'tcx>) -> bool {
@@ -709,7 +709,8 @@ fn main() {
       assert!(!place_info.may_overlap(raw.mk(), raw.deref().field(0).mk()));
       assert!(place_info.may_overlap(union.field(0).mk(), union.field(1).mk()));
       assert!(
-        place_info.may_overlap(option.downcast(0).mk(), option.downcast(1).field(0).mk())
+        !place_info
+          .may_overlap(option.downcast(0).mk(), option.downcast(1).field(0).mk())
       );
       assert!(!place_info.may_overlap(
         option.downcast(1).field(0).field(0).mk(),
