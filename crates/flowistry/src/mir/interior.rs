@@ -37,6 +37,16 @@ pub fn interior_pointers<'tcx>(
   Interior::visit(place, tcx, body, def_id, StoppingCondition::None).pointers
 }
 
+pub fn all_places<'tcx>(
+  body: &Body<'tcx>,
+  tcx: TyCtxt<'tcx>,
+  def_id: DefId,
+) -> impl Iterator<Item = Place<'tcx>> {
+  body.local_decls.indices().flat_map(move |local| {
+    interior_paths(Place::from_local(local, tcx), tcx, body, def_id)
+  })
+}
+
 #[derive(Clone, Copy)]
 enum StoppingCondition {
   None,

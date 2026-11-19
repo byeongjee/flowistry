@@ -65,6 +65,7 @@ type LoanMap<'tcx> = HashMap<RegionVid, LoanSet<'tcx>>;
 pub struct Aliases<'a, 'tcx> {
   tcx: TyCtxt<'tcx>,
   body: &'a Body<'tcx>,
+  def_id: DefId,
   static_region: RegionVid,
   pub(super) loans: LoanMap<'tcx>,
   pub(super) parameter_loans: PlaceSet<'tcx>,
@@ -399,6 +400,7 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
     Aliases {
       tcx,
       body,
+      def_id,
       static_region,
       loans: contains,
       parameter_loans,
@@ -470,6 +472,12 @@ impl<'a, 'tcx> Aliases<'a, 'tcx> {
       .unwrap();
 
     let ptr_ty = ptr.ty(self.body.local_decls(), self.tcx).ty;
+
+    // A raw pointer may point anywhere.
+    if ptr_ty.is_raw_ptr() {
+      aliases.extend(interior::all_places(self.body, self.tcx, self.def_id));
+      return aliases;
+    }
 
     // ptr : &'region orig_ty
     let (region, orig_ty) = match ptr_ty.kind() {
