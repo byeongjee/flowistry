@@ -14,7 +14,7 @@ use rustc_middle::{
   },
 };
 use rustc_utils::{
-  AdtDefExt, BodyExt, MutabilityExt, PlaceExt, block_timer,
+  AdtDefExt, BodyExt, PlaceExt, block_timer,
   cache::{Cache, CopyCache},
   mir::{
     location_or_arg::{
@@ -357,12 +357,26 @@ impl<'a, 'tcx> PlaceInfo<'a, 'tcx> {
     })
   }
 
+  pub fn is_accessible(
+    &self,
+    place: Place<'tcx>,
+    path_mutability: Mutability,
+    mutability: Mutability,
+  ) -> bool {
+    match mutability {
+      Mutability::Not => true,
+      Mutability::Mut => {
+        let ty: Ty<'tcx> = place.ty(self.body.local_decls(), self.tcx).ty;
+        path_mutability == Mutability::Mut
+          || may_contain_unsafe_cell(self.tcx, self.body.typing_env(self.tcx), ty)
+      }
+    }
+  }
+
   fn collect_loans(&self, ty: Ty<'tcx>, mutability: Mutability) -> PlaceSet<'tcx> {
     let mut collector = LoanCollector {
+      place_info: self,
       aliases: &self.aliases,
-      tcx: self.tcx,
-      body: self.body,
-      typing_env: self.body.typing_env(self.tcx),
       unknown_region: Region::new_var(self.tcx, UNKNOWN_REGION),
       target_mutability: mutability,
       stack: vec![],
@@ -413,11 +427,9 @@ impl<'a, 'tcx> PlaceInfo<'a, 'tcx> {
 
 // TODO: this visitor shares some structure with the PlaceCollector in mir utils.
 // Can we consolidate these?
-struct LoanCollector<'a, 'tcx> {
+struct LoanCollector<'p, 'a, 'tcx> {
+  place_info: &'p PlaceInfo<'a, 'tcx>,
   aliases: &'a Aliases<'a, 'tcx>,
-  tcx: TyCtxt<'tcx>,
-  body: &'a Body<'tcx>,
-  typing_env: TypingEnv<'tcx>,
   unknown_region: Region<'tcx>,
   target_mutability: Mutability,
   stack: Vec<Mutability>,
@@ -479,7 +491,7 @@ pub fn may_contain_unsafe_cell<'tcx>(
   finder.visit_ty(ty).is_break()
 }
 
-impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for LoanCollector<'_, 'tcx> {
+impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for LoanCollector<'_, '_, 'tcx> {
   type Result = ControlFlow<()>;
 
   fn visit_ty(&mut self, ty: Ty<'tcx>) -> Self::Result {
@@ -518,22 +530,18 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for LoanCollector<'_, 'tcx> {
       self
         .loans
         .extend(loans.iter().filter_map(|(place, mutability)| {
-          if ignore_mut {
-            return Some(place);
-          }
-          let loan_ty = place.ty(self.body.local_decls(), self.tcx).ty;
-          let loan_mutability =
-            if may_contain_unsafe_cell(self.tcx, self.typing_env, loan_ty) {
-              Mutability::Mut
-            } else if under_immut_ref {
-              Mutability::Not
-            } else {
-              *mutability
-            };
-          self
-            .target_mutability
-            .is_permissive_as(loan_mutability)
-            .then_some(place)
+          let path_mutability: Mutability = if under_immut_ref {
+            Mutability::Not
+          } else {
+            *mutability
+          };
+          (ignore_mut
+            || self.place_info.is_accessible(
+              *place,
+              path_mutability,
+              self.target_mutability,
+            ))
+          .then_some(place)
         }))
     }
 
