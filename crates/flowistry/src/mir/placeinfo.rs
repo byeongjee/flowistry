@@ -44,6 +44,8 @@ pub struct PlaceInfo<'a, 'tcx> {
   normalized_cache: CopyCache<Place<'tcx>, Place<'tcx>>,
   normalized_projections: CopyCache<PlaceElem<'tcx>, Option<PlaceElem<'tcx>>>,
   leaf_cache: CopyCache<Ty<'tcx>, bool>,
+  contains_cache: CopyCache<(Place<'tcx>, Place<'tcx>), bool>,
+  may_overlap_cache: CopyCache<(Place<'tcx>, Place<'tcx>), bool>,
   aliases_cache: Cache<Place<'tcx>, PlaceSet<'tcx>>,
   conflicts_cache: Cache<Place<'tcx>, PlaceSet<'tcx>>,
   reachable_cache: Cache<(Place<'tcx>, Mutability), PlaceSet<'tcx>>,
@@ -105,6 +107,8 @@ impl<'a, 'tcx> PlaceInfo<'a, 'tcx> {
       normalized_cache: CopyCache::default(),
       normalized_projections: CopyCache::default(),
       leaf_cache: CopyCache::default(),
+      contains_cache: CopyCache::default(),
+      may_overlap_cache: CopyCache::default(),
       conflicts_cache: Cache::default(),
       reachable_cache: Cache::default(),
       argument_places: OnceCell::new(),
@@ -228,12 +232,20 @@ impl<'a, 'tcx> PlaceInfo<'a, 'tcx> {
   }
 
   pub fn contains(&self, outer: Place<'tcx>, inner: Place<'tcx>) -> bool {
-    inner.local == outer.local
-      && inner.projection.starts_with(outer.projection)
-      && self.stays_in_prefix(inner, outer.projection.len())
+    self.contains_cache.get(&(outer, inner), |(outer, inner)| {
+      inner.local == outer.local
+        && inner.projection.starts_with(outer.projection)
+        && self.stays_in_prefix(inner, outer.projection.len())
+    })
   }
 
   pub fn may_overlap(&self, left: Place<'tcx>, right: Place<'tcx>) -> bool {
+    self.may_overlap_cache.get(&(left, right), |(left, right)| {
+      self.compute_may_overlap(left, right)
+    })
+  }
+
+  fn compute_may_overlap(&self, left: Place<'tcx>, right: Place<'tcx>) -> bool {
     if left.local != right.local {
       return false;
     }
