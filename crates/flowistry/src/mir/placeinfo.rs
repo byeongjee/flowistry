@@ -9,8 +9,9 @@ use rustc_hir::def_id::DefId;
 use rustc_middle::{
   mir::*,
   ty::{
-    Region, RegionKind, RegionVid, Ty, TyCtxt, TyKind, TypeSuperVisitable, TypeVisitable,
-    TypeVisitor, TypingEnv, Unnormalized, fold_regions,
+    List, PolyExistentialPredicate, Region, RegionKind, RegionVid, Ty, TyCtxt, TyKind,
+    TypeSuperVisitable, TypeVisitableExt, TypeVisitor, TypingEnv, Unnormalized,
+    fold_regions,
   },
 };
 use rustc_utils::{
@@ -49,6 +50,7 @@ pub struct PlaceInfo<'a, 'tcx> {
   aliases_cache: Cache<Place<'tcx>, PlaceSet<'tcx>>,
   conflicts_cache: Cache<Place<'tcx>, PlaceSet<'tcx>>,
   reachable_cache: Cache<(Place<'tcx>, Mutability), PlaceSet<'tcx>>,
+  places_with_unsafe_cell_cache: Cache<Place<'tcx>, PlaceSet<'tcx>>,
   argument_places: OnceCell<Vec<(Place<'tcx>, LocationOrArgIndex)>>,
 }
 
@@ -111,6 +113,7 @@ impl<'a, 'tcx> PlaceInfo<'a, 'tcx> {
       may_overlap_cache: CopyCache::default(),
       conflicts_cache: Cache::default(),
       reachable_cache: Cache::default(),
+      places_with_unsafe_cell_cache: Cache::default(),
       argument_places: OnceCell::new(),
     }
   }
@@ -357,20 +360,27 @@ impl<'a, 'tcx> PlaceInfo<'a, 'tcx> {
     })
   }
 
-  pub fn is_accessible(
+  pub fn places_accessible_through(
     &self,
     place: Place<'tcx>,
     path_mutability: Mutability,
     mutability: Mutability,
-  ) -> bool {
-    match mutability {
-      Mutability::Not => true,
-      Mutability::Mut => {
-        let ty: Ty<'tcx> = place.ty(self.body.local_decls(), self.tcx).ty;
-        path_mutability == Mutability::Mut
-          || may_contain_unsafe_cell(self.tcx, self.body.typing_env(self.tcx), ty)
-      }
+  ) -> Vec<Place<'tcx>> {
+    if mutability == Mutability::Not || path_mutability == Mutability::Mut {
+      vec![place]
+    } else {
+      self
+        .places_with_unsafe_cell(place)
+        .iter()
+        .copied()
+        .collect()
     }
+  }
+
+  fn places_with_unsafe_cell(&self, place: Place<'tcx>) -> &PlaceSet<'tcx> {
+    self.places_with_unsafe_cell_cache.get(&place, |place| {
+      interior::interior_places_with_unsafe_cell(place, self.tcx, self.body, self.def_id)
+    })
   }
 
   fn collect_loans(&self, ty: Ty<'tcx>, mutability: Mutability) -> PlaceSet<'tcx> {
@@ -443,52 +453,74 @@ fn is_freeze<'tcx>(tcx: TyCtxt<'tcx>, typing_env: TypingEnv<'tcx>, ty: Ty<'tcx>)
   fold_regions(tcx, ty, |_, _| tcx.lifetimes.re_erased).is_freeze(tcx, typing_env)
 }
 
-// A shared borrow of data with interior mutability (`&cell`, `&vec_of_cells`,
-// `&rc`) can mutate that data, so it is treated as a mutable loan.
-pub fn may_contain_unsafe_cell<'tcx>(
+pub fn contains_unsafe_cell<'tcx>(
   tcx: TyCtxt<'tcx>,
   typing_env: TypingEnv<'tcx>,
   ty: Ty<'tcx>,
 ) -> bool {
-  struct UnsafeCellFinder<'tcx> {
-    tcx: TyCtxt<'tcx>,
-    typing_env: TypingEnv<'tcx>,
-    visited: FxHashSet<Ty<'tcx>>,
-  }
-
-  impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for UnsafeCellFinder<'tcx> {
-    type Result = ControlFlow<()>;
-
-    fn visit_ty(&mut self, ty: Ty<'tcx>) -> Self::Result {
-      if !self.visited.insert(ty) {
-        return ControlFlow::Continue(());
-      }
-      if !is_freeze(self.tcx, self.typing_env, ty) {
-        return ControlFlow::Break(());
-      }
-      // `Freeze` is shallow, so the search goes through pointers. The explicit
-      // cases are the constituent types that the generic arguments do not show.
-      match ty.kind() {
-        TyKind::Adt(adt, args) => {
-          for field in adt.all_fields() {
-            field.ty(self.tcx, args).visit_with(self)?;
-          }
+  let mut visited = FxHashSet::default();
+  let mut pending = vec![ty];
+  while let Some(ty) = pending.pop() {
+    if !visited.insert(ty) {
+      continue;
+    }
+    match ty.kind() {
+      TyKind::Bool
+      | TyKind::Char
+      | TyKind::Int(_)
+      | TyKind::Uint(_)
+      | TyKind::Float(_)
+      | TyKind::Str
+      | TyKind::Never
+      | TyKind::FnDef(..)
+      | TyKind::FnPtr(..) => {}
+      TyKind::Adt(adt, args) => {
+        if !is_freeze(tcx, typing_env, ty) {
+          return true;
         }
-        TyKind::Coroutine(..) | TyKind::CoroutineWitness(..) => {
-          return ControlFlow::Break(());
-        }
-        _ => {}
+        pending.extend(adt.all_fields().map(|field| field.ty(tcx, args)));
+        pending.extend(args.types());
       }
-      ty.super_visit_with(self)
+      TyKind::Tuple(elements) => pending.extend(elements.iter()),
+      TyKind::Array(element, _) | TyKind::Slice(element) | TyKind::Pat(element, _) => {
+        pending.push(*element);
+      }
+      TyKind::Ref(_, pointee, _) | TyKind::RawPtr(pointee, _) => pending.push(*pointee),
+      TyKind::Closure(_, args) => pending.extend(args.as_closure().upvar_tys()),
+      TyKind::Coroutine(..) | TyKind::CoroutineWitness(..) => return true,
+      TyKind::Dynamic(predicates, _)
+        if let Some(types) = types_behind_trait_object(tcx, predicates) =>
+      {
+        pending.extend(types);
+      }
+      _ => {
+        if !is_freeze(tcx, typing_env, ty) {
+          return true;
+        }
+      }
     }
   }
+  false
+}
 
-  let mut finder = UnsafeCellFinder {
-    tcx,
-    typing_env,
-    visited: FxHashSet::default(),
-  };
-  finder.visit_ty(ty).is_break()
+pub fn types_behind_trait_object<'tcx>(
+  tcx: TyCtxt<'tcx>,
+  predicates: &'tcx List<PolyExistentialPredicate<'tcx>>,
+) -> Option<Vec<Ty<'tcx>>> {
+  let trait_def = predicates.principal_def_id()?;
+  if tcx.as_lang_item(trait_def).is_some()
+    || tcx.trait_is_auto(trait_def)
+    || tcx.is_trait_alias(trait_def)
+  {
+    return None;
+  }
+  tcx
+    .all_impls(trait_def)
+    .map(|impl_def| {
+      let self_ty = tcx.type_of(impl_def).instantiate_identity().skip_norm_wip();
+      (!self_ty.has_non_region_param()).then_some(self_ty)
+    })
+    .collect()
 }
 
 impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for LoanCollector<'_, '_, 'tcx> {
@@ -529,19 +561,19 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for LoanCollector<'_, '_, 'tcx> {
         is_extension_active(|mode| mode.mutability_mode == MutabilityMode::IgnoreMut);
       self
         .loans
-        .extend(loans.iter().filter_map(|(place, mutability)| {
-          let path_mutability: Mutability = if under_immut_ref {
+        .extend(loans.iter().flat_map(|(place, mutability)| {
+          let path_mutability: Mutability = if ignore_mut {
+            Mutability::Mut
+          } else if under_immut_ref {
             Mutability::Not
           } else {
             *mutability
           };
-          (ignore_mut
-            || self.place_info.is_accessible(
-              *place,
-              path_mutability,
-              self.target_mutability,
-            ))
-          .then_some(place)
+          self.place_info.places_accessible_through(
+            *place,
+            path_mutability,
+            self.target_mutability,
+          )
         }))
     }
 
