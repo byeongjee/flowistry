@@ -45,6 +45,7 @@ pub struct PlaceInfo<'a, 'tcx> {
   normalized_cache: CopyCache<Place<'tcx>, Place<'tcx>>,
   normalized_projections: CopyCache<PlaceElem<'tcx>, Option<PlaceElem<'tcx>>>,
   leaf_cache: CopyCache<Ty<'tcx>, bool>,
+  contains_unsafe_cell_cache: CopyCache<Ty<'tcx>, bool>,
   contains_cache: CopyCache<(Place<'tcx>, Place<'tcx>), bool>,
   may_overlap_cache: CopyCache<(Place<'tcx>, Place<'tcx>), bool>,
   aliases_cache: Cache<Place<'tcx>, PlaceSet<'tcx>>,
@@ -109,6 +110,7 @@ impl<'a, 'tcx> PlaceInfo<'a, 'tcx> {
       normalized_cache: CopyCache::default(),
       normalized_projections: CopyCache::default(),
       leaf_cache: CopyCache::default(),
+      contains_unsafe_cell_cache: CopyCache::default(),
       contains_cache: CopyCache::default(),
       may_overlap_cache: CopyCache::default(),
       conflicts_cache: Cache::default(),
@@ -379,7 +381,13 @@ impl<'a, 'tcx> PlaceInfo<'a, 'tcx> {
 
   fn places_with_unsafe_cell(&self, place: Place<'tcx>) -> &PlaceSet<'tcx> {
     self.places_with_unsafe_cell_cache.get(&place, |place| {
-      interior::interior_places_with_unsafe_cell(place, self.tcx, self.body, self.def_id)
+      interior::interior_places_with_unsafe_cell(place, self)
+    })
+  }
+
+  pub fn contains_unsafe_cell(&self, ty: Ty<'tcx>) -> bool {
+    self.contains_unsafe_cell_cache.get(&ty, |ty| {
+      contains_unsafe_cell(self.tcx, self.typing_env, ty)
     })
   }
 

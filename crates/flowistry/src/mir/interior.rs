@@ -4,11 +4,11 @@ use rustc_data_structures::fx::FxHashMap as HashMap;
 use rustc_hir::def_id::DefId;
 use rustc_middle::{
   mir::{Body, HasLocalDecls, Local, Mutability, Place, PlaceElem, ProjectionElem},
-  ty::{self, Region, RegionKind, RegionVid, Ty, TyCtxt, TyKind, TypingEnv},
+  ty::{self, Region, RegionKind, RegionVid, Ty, TyCtxt, TyKind},
 };
 use rustc_utils::{PlaceExt, mir::place::UNKNOWN_REGION};
 
-use super::{placeinfo::contains_unsafe_cell, utils::PlaceSet};
+use super::{placeinfo::PlaceInfo, utils::PlaceSet};
 
 pub fn interior_places<'tcx>(
   place: Place<'tcx>,
@@ -29,17 +29,15 @@ pub fn interior_places<'tcx>(
 
 pub fn interior_places_with_unsafe_cell<'tcx>(
   place: Place<'tcx>,
-  tcx: TyCtxt<'tcx>,
-  body: &Body<'tcx>,
-  def_id: DefId,
+  place_info: &PlaceInfo<'_, 'tcx>,
 ) -> PlaceSet<'tcx> {
   Interior::visit(
     place,
-    tcx,
-    body,
-    def_id,
+    place_info.tcx,
+    place_info.body,
+    place_info.def_id,
     StoppingCondition::BeforeRefs,
-    Some(body.typing_env(tcx)),
+    Some(place_info),
   )
   .places_with_unsafe_cell
 }
@@ -68,27 +66,27 @@ enum StoppingCondition {
   BeforeRefs,
 }
 
-struct Interior<'tcx> {
+struct Interior<'a, 'tcx> {
   tcx: TyCtxt<'tcx>,
   def_id: DefId,
   local: Local,
   place_stack: Vec<PlaceElem<'tcx>>,
   ty_stack: Vec<Ty<'tcx>>,
   stop_at: StoppingCondition,
-  typing_env: Option<TypingEnv<'tcx>>,
+  place_info: Option<&'a PlaceInfo<'a, 'tcx>>,
   places: PlaceSet<'tcx>,
   places_with_unsafe_cell: PlaceSet<'tcx>,
   pointers: HashMap<RegionVid, Vec<(Place<'tcx>, Mutability)>>,
 }
 
-impl<'tcx> Interior<'tcx> {
+impl<'a, 'tcx> Interior<'a, 'tcx> {
   fn visit(
     place: Place<'tcx>,
     tcx: TyCtxt<'tcx>,
     body: &Body<'tcx>,
     def_id: DefId,
     stop_at: StoppingCondition,
-    typing_env: Option<TypingEnv<'tcx>>,
+    place_info: Option<&'a PlaceInfo<'a, 'tcx>>,
   ) -> Self {
     let mut interior = Interior {
       tcx,
@@ -97,7 +95,7 @@ impl<'tcx> Interior<'tcx> {
       place_stack: place.projection.to_vec(),
       ty_stack: Vec::new(),
       stop_at,
-      typing_env,
+      place_info,
       places: PlaceSet::default(),
       places_with_unsafe_cell: PlaceSet::default(),
       pointers: HashMap::default(),
@@ -108,8 +106,8 @@ impl<'tcx> Interior<'tcx> {
 
   fn contains_unsafe_cell(&self, ty: Ty<'tcx>) -> bool {
     self
-      .typing_env
-      .is_some_and(|typing_env| contains_unsafe_cell(self.tcx, typing_env, ty))
+      .place_info
+      .is_some_and(|place_info| place_info.contains_unsafe_cell(ty))
   }
 
   fn visit_projection(&mut self, elem: PlaceElem<'tcx>, ty: Ty<'tcx>) -> bool {
@@ -240,7 +238,7 @@ impl<'tcx> Interior<'tcx> {
         self.visit_ty(args.as_closure().tupled_upvars_ty());
       }
 
-      TyKind::RawPtr(..) if self.typing_env.is_some() => {}
+      TyKind::RawPtr(..) if self.place_info.is_some() => {}
 
       TyKind::RawPtr(ty, _) => {
         self.visit_region(Region::new_var(tcx, UNKNOWN_REGION));
