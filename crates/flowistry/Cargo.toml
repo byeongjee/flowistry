@@ -15,7 +15,7 @@ test = ["rustc_utils/test", "preborrowck-mir/test"]
 debug = ["html-escape"]
 
 [dependencies]
-preborrowck-mir = { git = "https://github.com/byeongjee/preborrowck-mir.git", rev = "407126d20341358451427af4602966cc57b909b5" }
+preborrowck-mir = { git = "https://github.com/byeongjee/preborrowck-mir.git", rev = "3a19a26ac05e188a55c63461156bf85730d04bca" }
 anyhow = "1"
 log = "0.4"
 fluid-let = "1.0"
